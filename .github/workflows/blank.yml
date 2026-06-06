@@ -1,36 +1,110 @@
-# This is a basic workflow to help you get started with Actions
+name: Ubuntu VPS with Tunnel
 
-name: CI
-
-# Controls when the workflow will run
 on:
-  # Triggers the workflow on push or pull request events but only for the "main" branch
-  push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
+  workflow_dispatch:  # Manual trigger only
+    inputs:
+      duration:
+        description: 'Keep alive duration (minutes, max 360)'
+        required: false
+        default: '60'
 
-  # Allows you to run this workflow manually from the Actions tab
-  workflow_dispatch:
-
-# A workflow run is made up of one or more jobs that can run sequentially or in parallel
 jobs:
-  # This workflow contains a single job called "build"
-  build:
-    # The type of runner that the job will run on
+  ubuntu-vps:
     runs-on: ubuntu-latest
-
-    # Steps represent a sequence of tasks that will be executed as part of the job
+    
     steps:
-      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      # Runs a single command using the runners shell
-      - name: Run a one-line script
-        run: echo Hello, world!
-
-      # Runs a set of commands using the runners shell
-      - name: Run a multi-line script
+      - name: Install dependencies
         run: |
-          echo Add other actions to build,
-          echo test, and deploy your project.
+          sudo apt-get update
+          sudo apt-get install -y openssh-server curl wget
+          
+      - name: Setup SSH with root password
+        run: |
+          # Set root password (⚠️ INSECURE - use random password in production!)
+          echo "root:12345678" | sudo chpasswd
+          
+          # Configure SSH to allow password authentication
+          sudo sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
+          sudo sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config
+          sudo sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
+          
+          # Restart SSH service
+          sudo service ssh restart
+          sudo service ssh status
+          
+          # Get IP address
+          IP_ADDRESS=$(curl -s ifconfig.me)
+          echo "IP_ADDRESS=$IP_ADDRESS" >> $GITHUB_ENV
+          echo "Local IP: $IP_ADDRESS"
+          
+      - name: Install Bore Tunnel
+        run: |
+          # Install bore CLI
+          curl -LSfs https://github.com/ekzhang/bore/releases/latest/download/bore-x86_64-unknown-linux-musl.tar.gz | tar -xz -C /tmp
+          sudo mv /tmp/bore /usr/local/bin/
+          bore --version
+          
+      - name: Start Bore Tunnel
+        run: |
+          # Start bore tunnel for SSH port 22
+          bore local 22 --to bore.pub > bore_output.log 2>&1 &
+          BORE_PID=$!
+          echo "BORE_PID=$BORE_PID" >> $GITHUB_ENV
+          
+          # Wait for tunnel to establish
+          sleep 5
+          
+          # Extract the assigned port from bore output
+          BORE_URL=$(grep -oP 'bore.pub:\K[0-9]+' bore_output.log || echo "")
+          
+          if [ -z "$BORE_URL" ]; then
+            echo "Waiting for bore tunnel..."
+            sleep 5
+            BORE_URL=$(grep -oP 'bore.pub:\K[0-9]+' bore_output.log || echo "")
+          fi
+          
+          # If bore.pub fails, try alternative parsing
+          if [ -z "$BORE_URL" ]; then
+            cat bore_output.log
+            # Fallback: look for any port number in output
+            BORE_URL=$(cat bore_output.log | grep -oP '[0-9]{4,5}' | head -1 || echo "ERROR")
+          fi
+          
+          echo "BORE_PORT=$BORE_URL" >> $GITHUB_ENV
+          echo "::notice::Tunnel established at bore.pub:$BORE_URL"
+          
+      - name: Display Connection Info
+        run: |
+          echo "=========================================="
+          echo "  🖥️  UBUNTU VPS CONNECTION DETAILS"
+          echo "=========================================="
+          echo ""
+          echo "  Username : root"
+          echo "  Password : 12345678"
+          echo "  IP/Domain: bore.pub"
+          echo "  Port     : ${{ env.BORE_PORT }}"
+          echo ""
+          echo "  SSH Command:"
+          echo "  ssh root@bore.pub -p ${{ env.BORE_PORT }}"
+          echo ""
+          echo "  ⚠️  This runner will terminate after the timeout!"
+          echo "  ⏰  Job started at: $(date)"
+          echo "=========================================="
+          
+          # Keep the job alive for the specified duration
+          DURATION=${{ github.event.inputs.duration }}
+          echo "Keeping alive for $DURATION minutes..."
+          sleep $(($DURATION * 60))
+          
+      - name: Cleanup
+        if: always()
+        run: |
+          echo "Cleaning up..."
+          # Kill bore tunnel if still running
+          if [ -n "${{ env.BORE_PID }}" ]; then
+            kill ${{ env.BORE_PID }} 2>/dev/null || true
+          fi
+          echo "Job completed at: $(date)"
