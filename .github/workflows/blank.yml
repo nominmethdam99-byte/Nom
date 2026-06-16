@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       duration:
-        description: 'Keep alive duration (minutes, max 2)'
+        description: 'Keep alive duration (minutes, max 402)'
         required: false
-        default: '1'
+        default: '420'
 
 jobs:
   ubuntu-vps:
